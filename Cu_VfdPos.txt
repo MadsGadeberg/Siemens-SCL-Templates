@@ -1,0 +1,436 @@
+(*
+Mads G. Jensen, 28-10-2022
+
+Feature Requests:
+- Setting Jerk
+- Setting Home speed from input parameter
+*)
+
+// timer used for desabling the drive after a completed action. This is done to prevent an error on the drive.
+#disableTimerDb.TON(IN := #Step = #"Step 230",
+                    PT := #DISABLE_TIME);
+
+REGION mainSequence
+    // Statement section REGION
+    CASE #Step OF
+        #"Step 0":      // Step 0 - init
+            // setting variables
+            #homed := false;
+            #initialized := false;
+            
+            IF true OR #initialized THEN
+                #Step := #"Step 10";
+            END_IF;
+            
+        10:    // Step 10 - idle
+            
+            #ExePosEdge := #iExecute AND NOT #ExeLastState;   // detect raising edge of execute
+            
+            IF NOT #drive.AxisError THEN
+                // Home
+                IF #ExePosEdge AND #iMode = #HOME_MODE  THEN
+                    #Step := 110;
+                // Pos Move
+                ELSIF #ExePosEdge AND #iMode = #POS_MODE AND #drive.AxisRef THEN
+                    #Step := 210;
+                // Jog Move
+                ELSIF (#iJogFwd OR #iJogRwd) AND #iJogdist <= 0 AND #iMode = #JOG_MODE THEN
+                    #Step := 310;
+                // Jog Move with maximum travel distance
+                ELSIF (#iJogFwd OR #iJogRwd) AND #iJogdist > 0 AND #iMode = #JOG_MODE THEN
+                    #Step := 400;
+                END_IF;
+            END_IF;
+            
+            #ExeLastState := #iExecute;
+            
+            //-------------------Homing-------------------
+        110:    // Step 110 - preparing homing
+            #drive.ModePos := 4;
+            #drive.Negative := TRUE;
+            #drive.EnableAxis := true;
+            #drive.ExecuteMode := false;
+            
+            IF #drive.AxisEnabled AND #drive.ActMode = 4 THEN
+                IF #drive.AxisRef THEN
+                    #Step := 120;
+                ELSIF NOT #drive.AxisRef THEN
+                    #Step := 130;
+                END_IF;
+            END_IF;
+            
+        120:    // Step 120 - axisRef
+            #drive.ExecuteMode := true;
+            
+            IF NOT #drive.AxisRef THEN
+                #Step := 130;
+            END_IF;
+            
+        130:    // Step 130 - Not axisRef
+            // debugging note
+            // If axisRef is true when homing againg then it only works if i reset ExecuteMode and after set it again. Then it starts reference search as expected.
+            #drive.ExecuteMode := "Dial1";
+            
+            IF #drive.AxisRef THEN
+                #Step := 140;
+            END_IF;
+            
+        140:    // Step 140 - Homed
+            #drive.Negative := false;
+            #drive.ExecuteMode := false;
+            #drive.EnableAxis := false;
+            
+            IF NOT #drive.AxisEnabled THEN
+                #Step := 10;
+            END_IF;
+            
+            //-------------------Positioning-------------------
+        210:    // Step 210 - Preparing positioning move
+            #drive.ModePos := 2;               // mode TO REF travel
+            #drive.EnableAxis := true;
+            #drive.ExecuteMode := false;
+            
+            // if we request the same position we just return with posOk
+            IF #iPos = #drive.Position THEN
+                #Step := 230;   // dont move. just return completed.
+            //AxisPosOk can be 1 or 0 depending on if a prior pos move have ben executed. if PosOK is true we ensure it goes false before listening for the True. if false we just listen for the true value. 
+            ELSIF #drive.AxisEnabled AND #drive.ActMode = 2 THEN
+                IF #drive.AxisPosOk THEN
+                    #Step := 220;
+                ELSIF NOT #drive.AxisPosOk THEN
+                    #Step := 225;
+                END_IF;
+            END_IF;
+            
+        220:    // Step 220 - execute and wait for AxisPosOk not true
+            #drive.Position := #iPos;
+            #drive.Velocity := #iVel;
+            #drive.ExecuteMode := true;
+            
+            IF NOT #drive.AxisPosOk THEN
+                #Step := 225;
+            END_IF;
+
+        225:    // execute and wait for target reached
+            #drive.Position := #iPos;
+            #drive.Velocity := #iVel;
+            #drive.ExecuteMode := true;
+            
+            IF #drive.AxisPosOk THEN
+                #Step := 230;
+            END_IF;
+
+        230:    // Step 230 - Move Completed
+            #drive.ExecuteMode := false;
+            // we halt in this step before disabling drive to avoid an error on the drive.
+
+            IF #disableTimerDb.Q THEN
+                #Step := #"Step 240";
+            END_IF;
+        240:    // Step 240 - Drive disabled
+            #drive.EnableAxis := false;
+
+            IF NOT #drive.AxisEnabled THEN
+                #Step := #"Step 10";
+            END_IF;
+            
+            
+            //-------------------Manual-------------------
+        310:    // Step 310 - Preparing Jog move
+            #drive.ModePos := 7;       // setting jog mode mode
+            #drive.EnableAxis := true;
+            #drive.Velocity := #iVel;
+            
+            IF #iJogFwd THEN
+                #Step := #"Step 320";
+            ELSIF #iJogRwd THEN
+                #Step := #"Step 330";
+            END_IF;
+            
+        320:    // Step 320 - Motor jogging CW
+            #drive.Jog1 := true;
+            
+            IF NOT #iJogFwd THEN
+                #Step := #"Step 340";
+            END_IF;
+        330:    // Step 330 - Motor jogging CCW
+            #drive.Jog2 := true;
+            
+            IF NOT #iJogRwd THEN
+                #Step := #"Step 340";
+            END_IF;
+            
+        340:    // Step 340 - Motor Stopping
+            #drive.Jog1 := #drive.Jog2 := false;
+            // assignments
+            
+            IF #drive.AxisPosOk THEN
+                #Step := #"Step 350";
+            END_IF;
+            
+            
+            
+            
+        400:    // Step 410 - Preparing relative pos move of JogDist
+            #drive.ModePos := 1;       // setting relative move
+            #drive.EnableAxis := true;
+            #drive.ExecuteMode := false;
+            #drive.Velocity := #iVel;       // not used for jog speed
+            
+            IF #drive.AxisEnabled AND #drive.ModePos = 1 THEN
+                IF #iJogFwd THEN
+                    #Step := 410;
+                ELSIF #iJogRwd THEN
+                    #Step := 440;
+                ELSE
+                    #Step := 350;
+                END_IF;
+            END_IF;
+            
+            
+        410:    // FWD prepare
+            #drive.Position := #iJogdist;
+            
+            IF #iJogFwd THEN
+                IF #drive.AxisPosOk THEN
+                    #Step := 420;
+                ELSIF NOT #drive.AxisPosOk THEN
+                    #Step := 430;
+                END_IF;
+            ELSE
+                #Step := 470;   // stopping
+            END_IF;
+            
+        420:    // Startet, wait for NOT PosOK
+            #drive.ExecuteMode := true;
+            
+            IF #iJogFwd THEN
+                IF NOT #drive.AxisPosOk THEN
+                    #Step := 430;
+                END_IF;
+            ELSE
+                #Step := 470;   // stopping
+            END_IF;
+
+        430:    // Started, wait for PosOK
+            #drive.ExecuteMode := true;
+            
+            IF #iJogFwd THEN
+                IF #drive.AxisPosOk THEN
+                    #Step := 350;
+                END_IF;
+            ELSE
+                #Step := 470;   // stopping
+            END_IF;
+
+            
+        440:    // RWD prep
+            #drive.Position := - #iJogdist;
+            
+            IF #iJogRwd THEN
+                IF #drive.AxisPosOk THEN
+                    #Step := 450;
+                ELSIF NOT #drive.AxisPosOk THEN
+                    #Step := 460;
+                END_IF;
+            ELSE
+                #Step := 470;   // stopping
+            END_IF;
+            
+        450:    // Startet, wait for NOT PosOK
+            #drive.ExecuteMode := true;
+            
+            IF NOT #drive.AxisPosOk THEN
+                #Step := 460;
+            END_IF;
+            
+            IF #iJogRwd THEN
+                IF NOT #drive.AxisPosOk THEN
+                    #Step := 460;
+                END_IF;
+            ELSE
+                #Step := 470;   // stopping
+            END_IF;
+            
+        460:    // Started, wait for PosOK
+            #drive.ExecuteMode := true;
+            
+            IF #iJogRwd THEN
+                IF #drive.AxisPosOk THEN
+                    #Step := 350;
+                END_IF;
+            ELSE
+                #Step := 470;   // stopping
+            END_IF;
+            
+        470:    // Step 340 - Motor Stopping
+            #drive.ExecuteMode := false;
+            #drive.CancelTraversing := false;      //input are negated. False means stop
+            
+            IF #drive.AxisPosOk THEN
+                #Step := #"Step 350";
+            END_IF;
+            
+        350:    // Step 350 - Motor Stopped
+            #drive.ExecuteMode := false;
+            #drive.EnableAxis := false;
+            #drive.CancelTraversing := true;      //input are negated. True means "run allowed"
+            //#oStopped := #Step = 350;
+            
+            IF true THEN
+                #Step := #"Step 10";
+            END_IF;
+            
+        1000:   // Step 1000 - Stopping
+            //stop axes with normal ramp or acceleration times
+            #drive.CancelTraversing := false;      //input are negated
+            
+            IF #drive.AxisPosOk THEN
+                #Step := 1010;
+            END_IF;
+            
+        1010:   // Stopped
+            #oStopped := #Step = 1010;
+            #drive.EnableAxis := false;           // inputs are negated
+            
+            
+        ELSE    // Statement section ELSE
+            // error state
+            // Set error
+            // Wait for operator to ack
+            // return to init
+            ;
+    END_CASE;
+
+END_REGION
+
+REGION stop/error
+    IF #iStop THEN
+        #Step := 1000;
+    END_IF;
+    
+    IF NOT #iSafetyOk THEN
+        #drive.CancelTraversing := #drive.IntermediateStop := false;
+    END_IF;
+    
+    IF "Reset" THEN
+        #Step := 0;
+        #StepCurrent := 0;
+        #drive.ExecuteMode := false;
+        #drive.AckError := true;
+        #drive.EnableAxis := false;
+        #drive.CancelTraversing := true;      //input are negated. True means "run allowed"
+        #drive.IntermediateStop := true;
+        #drive.Positive := false;
+        #drive.Negative := false;
+    ELSE
+        #drive.AckError := false;
+    END_IF;
+    
+END_REGION
+
+
+REGION #interface
+    // runtime status
+    #oMode := #iMode;
+    #oHomed := #drive.AxisRef;                
+    #oStopped := #Step <= 10;
+    #oPosOk := false AND #drive.AxisPosOk;    
+    #oPos := #drive.ActPosition;
+    // Error and Warnings
+    #oError := #drive.AxisError;
+    #oErrorNr := #drive.ActFault;
+    #oWarn := #drive.AxisWarn;
+    #oWarnNr := #drive.ActWarn;
+    // runtime data
+    #oVel := #drive.ActVelocity;
+    //#oCurrent :=                              // see region oCurrent
+    #oTorque := 0;                              // not implemented
+    #oPos := #drive.Position;
+    
+    // REGION oCurrent
+    //     // Current
+    //     CASE #StepCurrent OF
+    //         0:  // init
+    //             #axisParaCurrent.ReadWrite := 0;
+    //             #axisParaCurrent.Parameter := 0027;         // r0027 CO: Absolute actual current smoothed / I_act abs val smth
+    //             #axisParaCurrent.Index := 0;
+    //             #axisParaCurrent.AxisNo := 1;
+    //             #axisParaCurrent.hardwareId := #iDriveHWID;
+    //             #axisParaCurrent.Start := false;
+                
+    //             #StepCurrent := 1;
+    //         1:  // Get Current
+    //             #axisParaCurrent.Start := true;
+                
+    //             IF #axisParaCurrent.Busy THEN
+    //                 #StepCurrent := 2;
+    //             END_IF;
+    //         2:  // Block Busy
+    //             #axisParaCurrent.Start := FALSE;
+                
+    //             IF #axisParaCurrent.Done THEN
+    //                 #StepCurrent := 3;
+    //             ELSIF #axisParaCurrent.Error THEN
+    //                 #StepCurrent := 10;
+    //             END_IF;
+                
+    //         3:  // Block done, Reading value
+    //             #oCurrent := #axisParaCurrent.ValueRead2;
+    //             #StepCurrent := 1;
+    //         10:
+    //             // Error state
+    //             ;
+    //     END_CASE;
+    // END_REGION
+    // //#oTorque;
+END_REGION
+
+REGION Block Calls
+    #axisPara(hardwareId := #iDriveHWID);
+    #axisParaCurrent(hardwareId := #iDriveHWID);
+    #drive(HWIDSTW := #iDriveHWID, HWIDZSW := #iDriveHWID);
+END_REGION
+
+REGION code snippets
+    // // Statement section REGION
+    
+    // 211:    // Activating Jerk
+    // #axisPara.ReadWrite := 1;
+    // #axisPara.Parameter := 2574;         // P2574 Max Jerk
+    // #axisPara.Index := 0;
+    // #axisPara.ValueWrite1 := #iJerk;
+    // #axisPara.ValueWrite2 := 0;
+    // #axisPara.AxisNo := 1;
+    // #axisPara.hardwareId := #iAxisHWIDSTW;
+    // #axisPara.Start := true;
+    
+    // IF #axisPara.Busy THEN
+    //     #Step := 212;
+    // END_IF;
+    
+    // 212:    // waiting done
+    // IF #axisPara.Done THEN
+    //     #Step := 213;
+    // END_IF;
+    
+    // 213:    // Setting Jerk
+    // #axisPara.ReadWrite := 1;
+    // #axisPara.Parameter := 2575;         // P2575 Jerk Limiting Activation
+    // #axisPara.Index := 0;
+    // #axisPara.ValueWrite1 := 1;
+    // #axisPara.ValueWrite2 := 0;
+    // #axisPara.AxisNo := 1;
+    // #axisPara.hardwareId := #iAxisHWIDSTW;
+    // #axisPara.Start := true;
+    
+    // IF #axisPara.Busy THEN
+    //     #Step := 214;
+    // END_IF;
+    
+    // 214:    // waiting done
+    // IF #axisPara.Done THEN
+    //     #Step := 220;
+    // END_IF;
+    
+END_REGION
